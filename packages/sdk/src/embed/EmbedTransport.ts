@@ -90,6 +90,8 @@ export interface EmbedTransportHandlers {
   onCommandExecute?: (data: CommandExecuteData) => void | Promise<void>;
   onCommandFocus?: () => void | Promise<void>;
   onCommandSave?: () => void | Promise<void>;
+  onCommandSaveServer?: () => void | Promise<void>;
+  onCommandSaveLocal?: () => void | Promise<void>;
   onCommandLoad?: () => void | Promise<void>;
   /** Host → editor signing session. Editor responds with `signature.request.ack`. */
   onSignatureRequest?: (
@@ -171,7 +173,17 @@ export class EmbedTransport {
    *  mirror of the React `onSave` hook. The host persists however it
    *  likes; no response is awaited. */
   sendSaveNotify(data: SaveNotifyData): void {
-    this.post('casual.save.notify', data);
+    this.post('casual.save.notify', data, data.bytes ? [data.bytes] : []);
+  }
+
+  /** Editor -> host: the workbook changed since the last load/save. */
+  sendDirtyChange(dirty: boolean): void {
+    this.post('casual.server.dirty', { dirty });
+  }
+
+  /** Editor -> host: invoke a host-owned file action from the SDK File menu. */
+  postCommand(type: 'casual.command.save.server' | 'casual.command.save.local'): void {
+    this.post(type, {});
   }
 
   /** Editor → Host: the editor is unmounting. Carries the final snapshot
@@ -283,6 +295,12 @@ export class EmbedTransport {
         return;
       case 'casual.command.save':
         await this.handlers.onCommandSave?.();
+        return;
+      case 'casual.command.save.server':
+        await this.handlers.onCommandSaveServer?.();
+        return;
+      case 'casual.command.save.local':
+        await this.handlers.onCommandSaveLocal?.();
         return;
       case 'casual.command.load':
         await this.handlers.onCommandLoad?.();

@@ -35,13 +35,14 @@
 
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { LocaleType } from '@univerjs/core';
 
 import { EmbedTransport } from '../embed/EmbedTransport';
 import type { CasualApp } from '../embed/protocol';
 import { CasualSheets } from '../sheets/CasualSheets';
 import { applyReadOnly, getEditable } from '../sheets/read-only';
-import { xlsxToWorkbookData } from '../xlsx';
-import { EMBED_LOCALES } from './locale';
+import { workbookDataToXlsx, xlsxToWorkbookData } from '../xlsx';
+import { EMBED_LOCALES, resolveEmbedLocale } from './locale';
 import type { IWorkbookData } from '@univerjs/core';
 
 interface EmbedUrlConfig {
@@ -169,6 +170,7 @@ function EmbeddedSheets({
 }) {
   const [data, setData] = useState<IWorkbookData | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [locale, setLocale] = useState<LocaleType>(LocaleType.EN_US);
 
   // Off-main formula compute. Without this the formula engine recalcs on the
   // MAIN thread, so opening a formula-heavy workbook froze the iframe. Spawn the
@@ -225,12 +227,34 @@ function EmbeddedSheets({
   // onReady. Univer's own chrome stays off in both modes.
   const chrome: 'full' | 'none' = viewMode === 'editor' ? 'full' : 'none';
   const ui = { header: false, toolbar: false, footer: false, contextMenu: true };
+  const extensions = {
+    menu: [
+      {
+        menu: 'file' as const,
+        id: 'save-to-server',
+        label: 'Save to server',
+        icon: 'cloud_upload',
+        onClick: () => transport.postCommand('casual.command.save.server'),
+      },
+      {
+        menu: 'file' as const,
+        id: 'save-to-local',
+        label: 'Save to local',
+        icon: 'download',
+        onClick: () => transport.postCommand('casual.command.save.local'),
+      },
+    ],
+  };
 
   useEffect(() => {
     transport.on({
       onCommandSetTheme: ({ theme: next }) => setTheme(next),
       onCommandSetFeatures: ({ features: next }) => setFeatures(next),
       onCommandSetViewMode: ({ viewMode: next }) => setViewMode(next),
+      onCommandSetLocale: ({ locale: next }) => {
+        const resolved = resolveEmbedLocale(next);
+        setLocale(resolved.code);
+      },
     });
   }, [transport]);
 
@@ -302,7 +326,9 @@ function EmbeddedSheets({
   }
 
   // Force a remount when viewMode flips — CasualSheets locks the UI
-  // config at registerPlugin time and won't pick up new props.
+  // config at registerPlugin time and won't pick up new props. Locale is
+  // intentionally excluded: changing the host language must not dispose the
+  // live workbook or interrupt an in-flight XLSX load/save operation.
   return (
     <CasualSheets
       key={viewMode}
@@ -311,6 +337,7 @@ function EmbeddedSheets({
       appearance={appearance}
       formula={formulaWorker ? { worker: formulaWorker } : undefined}
       features={features}
+      extensions={extensions}
       onDialogRequest={(kind, context) => transport.sendDialogRequest({ kind, context })}
       ui={ui}
       // Seed the en-US string bundle. Without `locales`, Univer's
@@ -319,6 +346,7 @@ function EmbeddedSheets({
       // but the grid is blank). The React `<CasualSheets>` host path gets
       // this from the host's `locales` prop; the iframe has no host to
       // pass one, so the self-contained runtime bundles a minimal set.
+      locale={locale}
       locales={EMBED_LOCALES}
       // Enable the FULL feature set (tables, sort, filter, conditional
       // formatting, data validation, drawing, hyperlinks, notes, comments,
@@ -330,14 +358,22 @@ function EmbeddedSheets({
       // also eager-loads any feature whose data is already in the snapshot
       // (so opening a file with tables/CF never silently drops it) and
       // idle-loads the rest, so the toolbar/menu feature actions resolve.
-      lazyPlugins={true}
+      // The standalone iframe already bundles the core spreadsheet runtime.
+      // Delayed optional plugin registration can race the iframe's provider
+      // lifecycle and throw `_assertPluginValid`, which removes the File menu
+      // before host-owned save actions can be used.
+      lazyPlugins={false}
       // Phase 2 save/exit contract — the iframe surface of the same
       // `onSave` / `onExit` hooks the React component exposes. The editor
       // never persists; it hands the snapshot to the host over postMessage
       // and the host decides what to do with it (WOPI, Drive, localStorage
       // demo, …). `onSave` fires on Ctrl/Cmd+S inside the iframe; `onExit`
       // on unmount.
-      onSave={(snapshot) => transport.sendSaveNotify({ snapshot, reason: 'shortcut' })}
+      onSave={async (snapshot) => {
+        const bytes = await workbookDataToXlsx(snapshot).then((blob) => blob.arrayBuffer());
+        transport.sendSaveNotify({ snapshot, reason: 'shortcut', bytes });
+      }}
+      onDirtyChange={(dirty) => transport.sendDirtyChange(dirty)}
       onExit={(snapshot) => transport.sendExit({ snapshot })}
       onReady={(api) => {
         // Expose the imperative API on the iframe window so hosts can
@@ -410,7 +446,38 @@ function EmbeddedSheets({
           onCommandSave: () => {
             try {
               const snapshot = apiAny.getSnapshot();
-              if (snapshot) transport.sendSaveNotify({ snapshot, reason: 'host' });
+              if (snapshot) {
+                void workbookDataToXlsx(snapshot as IWorkbookData)
+                  .then((blob) => blob.arrayBuffer())
+                  .then((bytes) => transport.sendSaveNotify({ snapshot, reason: 'host', bytes }))
+                  .catch(() => undefined);
+              }
+            } catch {
+              /* snapshot unavailable during boot — ignore */
+            }
+          },
+          onCommandSaveServer: () => {
+            try {
+              const snapshot = apiAny.getSnapshot();
+              if (snapshot) {
+                void workbookDataToXlsx(snapshot as IWorkbookData)
+                  .then((blob) => blob.arrayBuffer())
+                  .then((bytes) => transport.sendSaveNotify({ snapshot, reason: 'host', bytes }))
+                  .catch(() => undefined);
+              }
+            } catch {
+              /* snapshot unavailable during boot — ignore */
+            }
+          },
+          onCommandSaveLocal: () => {
+            try {
+              const snapshot = apiAny.getSnapshot();
+              if (snapshot) {
+                void workbookDataToXlsx(snapshot as IWorkbookData)
+                  .then((blob) => blob.arrayBuffer())
+                  .then((bytes) => transport.sendSaveNotify({ snapshot, reason: 'host', bytes }))
+                  .catch(() => undefined);
+              }
             } catch {
               /* snapshot unavailable during boot — ignore */
             }

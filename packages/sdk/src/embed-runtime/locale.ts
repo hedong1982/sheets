@@ -99,3 +99,12 @@ const enUS = Tools.deepMerge(
 export const EMBED_LOCALES = {
   [LocaleType.EN_US]: enUS,
 };
+
+export function resolveEmbedLocale(requested: string): { code: LocaleType; locale: typeof enUS } {
+  const normalized = String(requested || '').toLowerCase();
+  // The public Univer packages currently ship the English bundle in this
+  // self-contained runtime. Keep the mapping explicit so adding published
+  // locale bundles later does not change the fallback contract.
+  const code = normalized.startsWith('zh') ? LocaleType.EN_US : LocaleType.EN_US;
+  return { code, locale: enUS };
+}

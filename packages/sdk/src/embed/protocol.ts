@@ -127,6 +127,9 @@ export interface SaveNotifyData {
   snapshot: unknown;
   /** What triggered the save: the in-editor shortcut or a host command. */
   reason: 'shortcut' | 'host';
+  /** Optional XLSX bytes produced by the embedded runtime for host storage. */
+  bytes?: ArrayBuffer;
+  etag?: string;
 }
 
 /** Editor → host: the editor is unmounting / navigating away. Carries
